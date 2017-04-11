@@ -1,7 +1,7 @@
 # Paged REST proxy
-[![Build Status](https://travis-ci.org/sesam-community/sesam-paged-rest-proxy.svg?branch=master)](https://travis-ci.org/sesam-community/paged-rest-proxy)
+[![Build Status](https://travis-ci.org/sesam-community/sesam-paged-rest-proxy.svg?branch=master)](https://travis-ci.org/sesam-community/sesam-paged-rest-proxy)
 
-A small microservice to get/post entities from/to a REST api. 
+A small microservice to get/post entities from/to a REST api.
 
 This microservice needs information about startpage and number of entities per page.
 
