@@ -4,6 +4,8 @@ from flask import Flask, request, Response
 import os
 import requests
 import logging
+import dotdictify
+from time import sleep
 
 app = Flask(__name__)
 logger = None
@@ -17,17 +19,101 @@ logger.addHandler(stdout_handler)
 logger.setLevel(logging.DEBUG)
 
 prop = os.environ.get('response_property', 'response')
-header_values= os.environ.get('header_values', 'Content-Type').split(',')
 response = None
+
+headers = {}
+if os.environ.get('headers') is not None:
+    headers = json.loads(os.environ.get('headers').replace("'","\""))
+
+
+class DataAccess:
+
+    def __get_all_paged_entities(self, path, url_parameters):
+        logger.info("Fetching data from paged url: %s", path)
+        url = os.environ.get("baseurl") + path
+        url = call_url(url, url_parameters, url_parameters.get(os.environ.get('startpage')))
+        has_more_results = True
+        page_counter = 1
+
+        while has_more_results:
+            if os.environ.get('sleep') is not None:
+                logger.info("sleeping for %s milliseconds", os.environ.get('sleep') )
+                sleep(float(os.environ.get('sleep')))
+
+            logger.info("Fetching data from url: %s", url)
+            req = requests.get(url, headers=headers)
+            if req.status_code != 200:
+                logger.error("Unexpected response status code: %d with response text %s" % (req.status_code, req.text))
+                raise AssertionError ("Unexpected response status code: %d with response text %s"%(req.status_code, req.text))
+            dict = dotdictify.dotdictify(json.loads(req.text))
+            for entity in dict.results:
+                yield entity
+            if str_to_bool(dict.get(os.environ.get('next_page_path'))):
+                page_counter += 1
+                url = os.environ.get("baseurl") + path
+                url = call_url(url, url_parameters, str(page_counter))
+            else:
+                has_more_results = False
+        logger.info('Returning entities from %i pages', page_counter)
+
+
+    def get_paged_entities(self, path, url_parameters):
+        print("getting all paged")
+        return self.__get_all_paged_entities(path, url_parameters)
+
+    def get(self, path):
+        print('getting all users')
+        return self.__get_all_users(path)
+
+data_access_layer = DataAccess()
+
+
+def stream_json(clean):
+    first = True
+    yield '['
+    for i, row in enumerate(clean):
+        if not first:
+            yield ','
+        else:
+            first = False
+        yield json.dumps(row)
+    yield ']'
+
+def call_url(base_url, url_parameters, page):
+    call_url = base_url
+    first = True
+    for k, v in url_parameters.items():
+        if first:
+            if k == os.environ.get('startpage'):
+                call_url += '?' + k + '=' + page
+            else:
+                call_url += '?' + k + '=' + v
+        else:
+            if  k == os.environ.get('startpage'):
+                call_url += '&' + k + '=' + page
+            else:
+                call_url += '&' + k + '=' + v
+        first = False
+    return call_url
+
+def str_to_bool(string_input):
+    return str(string_input).lower() == "true"
+
+
+@app.route("/<path:path>", methods=["GET"])
+def get(path):
+    entities = data_access_layer.get_paged_entities(path, request.args)
+    return Response(
+        stream_json(entities),
+        mimetype='application/json'
+    )
+
 
 @app.route("/", methods=[ "POST"])
 def postreceiver():
     entities = request.get_json()
-    header = {}
+    header = json.loads(os.environ.get('headers').replace("'","\""))
     logger.info("Receiving entities")
-    for k,v in dict(request.headers).items():
-        if k in header_values:
-            header[k] = v
 
     response_list = []
     client = app.test_client()
@@ -48,16 +134,16 @@ def postreceiver():
         response_list.append({})
     return Response(json.dumps(response_list),status=statuscode, mimetype='application/json')
 
+
 @app.route("/notpaged/", methods=["POST"])
 def notpaged():
     baseurl = os.environ.get('baseurl')
 
     entities = request.get_json()
-    header = {}
+    header = json.loads(os.environ.get('headers').replace("'","\""))
+
     logger.info("Receiving entities")
-    for k, v in dict(request.headers).items():
-        if k in header_values:
-            header[k] = v
+
     if not isinstance(entities, list):
         entities = [entities]
     for entity in entities:
@@ -77,98 +163,6 @@ def notpaged():
     logger.info("Prosessed " + str(len(entities)) + " entities")
     return Response(json.dumps(entities), status=response.status_code, mimetype='application/json')
 
-@app.route("/<url>", methods=["GET"])
-def receiver(url):
-    baseurl = os.environ.get('baseurl') + url + "?"
-
-    response_list = processor(baseurl, request)
-    if len(response_list)== 0:
-        response_list.append({})
-    elif response_list[0] == "Error":
-        return Response(response_list[1], status=response_list[2], mimetype='application/json')
-    return Response(response=json.dumps(response_list), mimetype='application/json')
-
-@app.route("/<url1>/<url2>", methods=["GET"])
-def receiver2(url1, url2):
-    baseurl = os.environ.get('baseurl') + url1 + "/" + url2 + "?"
-    response_list = processor(baseurl, request)
-    if len(response_list)== 0:
-        response_list.append({})
-    elif response_list[0] == "Error":
-        return Response(response_list[1], status=response_list[2], mimetype='application/json')
-    return Response(response=json.dumps(response_list), mimetype='application/json')
-
-@app.route("/<url1>/<url2>/<url3>", methods=["GET"])
-def receiver3(url1, url2, url3):
-    baseurl = os.environ.get('baseurl') + url1 + "/" + url2 + "/" + url3 + "?"
-    response_list = processor(baseurl, request)
-    if len(response_list)== 0:
-        response_list.append({})
-    elif response_list[0] == "Error":
-        return Response(response_list[1], status=response_list[2], mimetype='application/json')
-    return Response(response=json.dumps(response_list), mimetype='application/json')
-
-def processor(baseurl, request):
-    header = {}
-
-    for k, v in dict(request.headers).items():
-        if k in header_values:
-            header[k] = v
-    pagesize = int(request.args.get(os.environ.get('pagesize')))
-    startPage = int(request.args.get(os.environ.get('startpage')))
-    logger.info("Processing data from baseurl: " + str(baseurl))
-
-    for k, v in request.args.to_dict(True).items():
-        if (k != os.environ.get('pagesize')) and (k != os.environ.get('startpage')):
-            baseurl += k + "=" + v + "&"
-
-    response_list = []
-    pagecounter = 0
-
-    response = call_service(baseurl,pagesize,startPage,header)
-    logger.info(response)
-    if response.status_code is not 200:
-        logger.error("Got Error Code: " + str(response.status_code) + " with text: " + response.text)
-        response_list.append(str("Error"))
-        response_list.append(str(response.text))
-        response_list.append(str(response.status_code))
-        return response_list
-    else:
-        if not next_page(json.loads(response.text)):
-            response_list += get_entities(json.loads(response.text))
-
-    while next_page(json.loads(response.text)):
-
-        response = call_service(baseurl, pagesize, startPage+pagecounter, header)
-        if response.status_code is not 200:
-            logger.error("Got Error Code: " + str(response.status_code) + " with text: " + response.text)
-            response_list.append(str("Error"))
-            response_list.append(str(response.text))
-            response_list.append(str(response.status_code))
-            return response_list
-
-        response_list += get_entities(json.loads(response.text))
-        logger.info("Got status code " + str(response.status_code) + " from page. "+ str(startPage+pagecounter) + ". Processing pagedata.")
-        pagecounter +=1
-
-    logger.info("fetched " +str(pagecounter) + " pages from start page " + str(startPage))
-    return response_list
-
-def next_page(hasnext):
-    has_next = hasnext.get(os.environ.get('next_page_property', 'hasMoreResults'))
-    logger.info("Next page exists: " + str(has_next))
-    return has_next
-
-def get_entities(entities):
-    for k, v in entities.items():
-        if k == os.environ.get('entity_property'):
-            return v
-
-def call_service(baseurl, pagesize,startPage,header):
-    request = requests.get(
-        baseurl + os.environ.get('pagesize') + "=" + str(pagesize) + "&" + os.environ.get('startpage') + "=" + str(startPage),
-        headers=header)
-    return request
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=os.environ.get('port',5001))
+    app.run(threaded=True, debug=True, host='0.0.0.0', port=os.environ.get('port',5002))
